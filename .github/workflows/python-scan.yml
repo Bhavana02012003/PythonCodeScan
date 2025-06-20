@@ -1,0 +1,66 @@
+name: Python Code Scan and Report
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  scan-python-code:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Linting Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pylint flake8 bandit
+
+      - name: Get Changed Python Files
+        id: changed-files
+        run: |
+          git fetch origin
+          git diff --name-only HEAD~1 HEAD -- '*.py' > changed_files.txt
+          cat changed_files.txt
+
+      - name: Run Lint Scans
+        run: |
+          mkdir -p reports
+
+          while IFS= read -r file; do
+            if [[ -f "$file" ]]; then
+              echo "📌 Scanning $file"
+              pylint "$file" --output-format=text > "reports/pylint_$(basename $file).txt" || true
+              flake8 "$file" --output-file="reports/flake8_$(basename $file).txt" || true
+              bandit -r "$file" -f txt -o "reports/bandit_$(basename $file).txt" || true
+            fi
+          done < changed_files.txt
+
+      - name: Merge Reports to CSV
+        run: |
+          echo "Tool,File,Line,Message" > violation-report.csv
+
+          for file in reports/*.txt; do
+            TOOL=$(echo "$file" | cut -d'_' -f1 | cut -d'/' -f2)
+            while IFS= read -r line; do
+              CLEAN_LINE=$(echo "$line" | sed 's/,//g' | tr -d '\r')
+              echo "$TOOL,$(basename $file .txt),,${CLEAN_LINE}" >> violation-report.csv
+            done < "$file"
+          done
+
+          cat violation-report.csv
+
+      - name: Upload Violation Report as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-violation-report
+          path: violation-report.csv
