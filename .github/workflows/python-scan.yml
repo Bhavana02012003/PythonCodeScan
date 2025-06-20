@@ -3,7 +3,7 @@ name: Python Code Scan and Report
 on:
   push:
     branches:
-      - "**"
+      - '**'
 
 jobs:
   scan-python-code:
@@ -12,52 +12,104 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Linting Tools
+      - name: Install Python Linters
         run: |
-          python -m pip install --upgrade pip
-          pip install pylint flake8 bandit
+          pip install bandit pylint flake8 flake8-json
 
-      - name: Get Changed Python Files
-        id: changed-files
+      - name: Run Bandit (JSON)
         run: |
-          git fetch origin
-          git diff --name-only HEAD~1 HEAD -- '*.py' > changed_files.txt
-          cat changed_files.txt
+          bandit -r app -f json -o bandit.json || true
 
-      - name: Run Lint Scans
+      - name: Run Pylint (JSON)
         run: |
-          mkdir -p reports
+          pylint app --output-format=json > pylint.json || true
 
-          while IFS= read -r file; do
-            if [[ -f "$file" ]]; then
-              echo "📌 Scanning $file"
-              pylint "$file" --output-format=text > "reports/pylint_$(basename $file).txt" || true
-              flake8 "$file" --output-file="reports/flake8_$(basename $file).txt" || true
-              bandit -r "$file" -f txt -o "reports/bandit_$(basename $file).txt" || true
-            fi
-          done < changed_files.txt
-
-      - name: Merge Reports to CSV
+      - name: Run Flake8 (JSON)
         run: |
-          echo "Tool,File,Line,Message" > violation-report.csv
+          flake8 --format=json --output-file=flake8.json || true
 
-          for file in reports/*.txt; do
-            TOOL=$(echo "$file" | cut -d'_' -f1 | cut -d'/' -f2)
-            while IFS= read -r line; do
-              CLEAN_LINE=$(echo "$line" | sed 's/,//g' | tr -d '\r')
-              echo "$TOOL,$(basename $file .txt),,${CLEAN_LINE}" >> violation-report.csv
-            done < "$file"
-          done
+      - name: Convert JSON Results to CSV
+        run: |
+          import json
+          import csv
 
-          cat violation-report.csv
+          def parse_bandit():
+              try:
+                  with open("bandit.json") as f:
+                      data = json.load(f)
+                  rows = []
+                  for result in data.get("results", []):
+                      rows.append([
+                          "bandit",
+                          result.get("filename", ""),
+                          result.get("line_number", ""),
+                          result.get("issue_severity", ""),
+                          result.get("issue_text", ""),
+                          result.get("test_id", ""),
+                          "Security"
+                      ])
+                  return rows
+              except Exception as e:
+                  print("Bandit parse error:", e)
+                  return []
+
+          def parse_pylint():
+              try:
+                  with open("pylint.json") as f:
+                      data = json.load(f)
+                  rows = []
+                  for item in data:
+                      rows.append([
+                          "pylint",
+                          item.get("path", ""),
+                          item.get("line", ""),
+                          item.get("type", "").capitalize(),
+                          item.get("message", ""),
+                          item.get("message-id", ""),
+                          "Code Quality"
+                      ])
+                  return rows
+              except Exception as e:
+                  print("Pylint parse error:", e)
+                  return []
+
+          def parse_flake8():
+              try:
+                  with open("flake8.json") as f:
+                      data = json.load(f)
+                  rows = []
+                  for file, issues in data.items():
+                      for issue in issues:
+                          rows.append([
+                              "flake8",
+                              file,
+                              issue.get("line_number", ""),
+                              "Style",
+                              issue.get("text", ""),
+                              issue.get("code", ""),
+                              "Style"
+                          ])
+                  return rows
+              except Exception as e:
+                  print("Flake8 parse error:", e)
+                  return []
+
+          all_violations = [["Tool", "File", "Line", "Severity", "Message", "Rule/Code", "Category"]]
+          all_violations += parse_bandit()
+          all_violations += parse_pylint()
+          all_violations += parse_flake8()
+
+          with open("violation-report.csv", "w", newline="") as f:
+              writer = csv.writer(f)
+              writer.writerows(all_violations)
+
+        shell: python
 
       - name: Upload Violation Report as Artifact
         uses: actions/upload-artifact@v4
